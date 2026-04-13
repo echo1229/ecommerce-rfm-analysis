@@ -1,0 +1,16 @@
+# 拦截所有本地生成的 DuckDB 数据库文件与缓存
+Duckdb/*.duckdb
+*.duckdb
+*.wal
+
+# 拦截 Python 运行缓存
+__pycache__/
+
+# 拦截系统隐式文件
+.DS_Store
+
+# 拦截所有生成的宽表数据和名单独
+*.csv
+
+# 拦截 PowerBI 源文件
+*.pbix
