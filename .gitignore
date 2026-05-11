@@ -14,3 +14,8 @@ __pycache__/
 
 # 拦截 PowerBI 源文件
 *.pbix
+
+# 拦截本地教程文件（仅供个人阅读，不入仓库）
+电商数据分析实战教程.md
+电商数据分析实战教程.pdf
+generate_tutorial_pdf.py
