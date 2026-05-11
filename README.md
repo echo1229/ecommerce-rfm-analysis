@@ -96,14 +96,19 @@ con.close()
 
 **Monetary (消费总金额)**：统计 `purchase` 行为的商品价格。
 
-**Intent (购买意向)**：统计 `view`（浏览）和 `cart`（加购）的总次数。
+**Intent (购买意向)**：统计 `view`（浏览）和 `cart`（加购）的加权次数。cart（加购）的购买意向远强于 view（浏览），因此 cart 权重设为 3，view 权重设为 1（权重比待真实转化数据校准）。
 
 ```sql
 SELECT user_id user_id,
     MAX(CASE WHEN event_type = 'purchase' THEN event_time ELSE NULL END) Recency,
     COUNT(CASE WHEN event_type = 'purchase' THEN 1 ELSE NULL END) Frequency,
     SUM(CASE WHEN event_type = 'purchase' THEN price ELSE 0 END) monetary,
-    COUNT(CASE WHEN event_type IN ('view', 'cart') THEN 1 ELSE NULL END) Intent
+    SUM(CASE                                              -- 加权 Intent
+        WHEN event_type = 'cart' THEN 3                   -- cart 权重 3（待校准）
+        WHEN event_type = 'view' THEN 1                   -- view 权重 1
+        ELSE 0
+    END) AS Intent,
+    MIN(event_time) AS first_seen                         -- 首次出现时间，用于新老用户区分
 FROM sample_events
 GROUP BY user_id;
 ```
@@ -136,7 +141,12 @@ SELECT user_id user_id,
     MAX(CASE WHEN event_type = 'purchase' THEN event_time ELSE NULL END) Recency,
     COUNT(CASE WHEN event_type = 'purchase' THEN 1 ELSE NULL END) Frequency,
     SUM(CASE WHEN event_type = 'purchase' THEN price ELSE 0 END) monetary,
-    COUNT(CASE WHEN event_type IN ('view', 'cart') THEN 1 ELSE NULL END) Intent
+    SUM(CASE                                              -- 加权 Intent
+        WHEN event_type = 'cart' THEN 3                   -- cart 权重 3（待校准）
+        WHEN event_type = 'view' THEN 1                   -- view 权重 1
+        ELSE 0
+    END) AS Intent,
+    MIN(event_time) AS first_seen                         -- 首次出现时间，用于新老用户区分
 FROM sample_events
 GROUP BY user_id),
 
@@ -409,10 +419,11 @@ print(df_potential[['Intent', 'session_seconds']].describe(
 
 | **用户标签**       | **命中逻辑 (核心维度)** | **业务定义与洞察**                                           |
 | :----------------- | :---------------------- | :----------------------------------------------------------- |
+| **新访客待观察**   | 首次出现 ≤7 天（待校准） | **初来乍到，尚无定论。** 数据窗口末尾才出现的新用户，尚未有足够时间产生转化行为，不应被误判为"低价值流量"。**建议动作：** 暂不纳入高成本营销，给予新人引导期，观察后续行为再分层。 |
 | **核心高意向潜客** | I>=4 且 S>=4            | **深度探索，临门一脚。** 互动频次与停留时间均处于极高梯队，对商品展现出强烈购买意向，是距离首单转化最近的"准客户"。**建议动作：** 集中预算定向推送新人首单无门槛大额券，极速促转化。 |
 | **高时长静默潜客** | I<4 且 S>=4             | **深度观望，犹豫不决。** 页面停留极长但缺乏有效交互（如加购）。属"高决策成本型"用户，可能在对比参数或阅读评价。**建议动作：** 排查优化详情页（PDP）卖点呈现，或通过智能客服弹窗主动介入打破静默。 |
 | **浅层高频交互客** | I>=4 且 S<=2            | **快速比价，漫无目的。** 短期内疯狂点击但火速跳出。典型特征为未匹配到精准需求或纯比价行为。**建议动作：** 优化推荐系统（RecSys）的人货匹配精准度，或使用限时秒杀弹窗截留注意力。 |
-| **尾部低价值流量** | I<=2 且 S<=2            | **无效流量，秒退跳出。** 互动极少且停留极短的底层流量，转化概率与营销价值极低。**建议动作：** 营销端作战略性放弃，停止短信与广告触达，严格控制单客获取成本（CAC）。 |
+| **尾部低价值流量** | I<=2 且 S<=2 且非新用户  | **无效流量，秒退跳出。** 互动极少且停留极短的老用户，转化概率与营销价值极低。**建议动作：** 营销端作战略性放弃，停止短信与广告触达，严格控制单客获取成本（CAC）。 |
 | **常规培育客群**   | 其他区间组合            | **普通访客，长效蓄水。** 意向度与时长表现中规中矩的普通流量盘。**建议动作：** 纳入自动化运营策略（如站内 Push、常态化类目活动），进行低成本长期心智培育。 |
 
 ```python
@@ -421,9 +432,18 @@ df_potential['I_score'] = pd.cut(df_potential['Intent'], bins=i_bins, labels=[1,
 s_bins = [-1, 0, 60, 180, 600, np.inf]
 df_potential['S_score'] = pd.cut(df_potential['session_seconds'], bins=s_bins, labels=[1, 2, 3, 4, 5]).astype(float)
 
+# 新老用户区分：首次出现时间在数据窗口末尾 7 天内的视为"新用户"
+NEW_USER_DAYS = 7  # 待校准，可根据业务转化周期调整
+data_end = df['first_seen'].max()
+df['is_new_user'] = (data_end - df['first_seen']).dt.days <= NEW_USER_DAYS
+
 # 定义潜客分层逻辑函数
 def get_potential_segment(row):
     i, s = row['I_score'], row['S_score']
+
+    # 新用户优先判断：首次出现时间在数据窗口末尾，尚未有足够时间转化
+    if row['is_new_user']:
+        return '新访客待观察'
 
     # 逻辑 A：高互动 + 高停留
     if i >= 4 and s >= 4:
@@ -434,7 +454,7 @@ def get_potential_segment(row):
     # 逻辑 C：高互动 + 低停留
     elif i >= 4 and s <= 2:
         return '浅层高频交互客'
-    # 逻辑 D：低互动 + 低停留
+    # 逻辑 D：低互动 + 低停留（仅对老用户判定为低价值）
     elif i <= 2 and s <= 2:
         return '尾部低价值流量'
     else:
@@ -520,7 +540,12 @@ WITH t1 AS (
         MAX(CASE WHEN event_type = 'purchase' THEN event_time ELSE NULL END) AS Recency,
         COUNT(CASE WHEN event_type = 'purchase' THEN 1 ELSE NULL END) AS Frequency,
         SUM(CASE WHEN event_type = 'purchase' THEN price ELSE 0 END) AS monetary,
-        COUNT(CASE WHEN event_type IN ('view', 'cart') THEN 1 ELSE NULL END) AS Intent
+        SUM(CASE                                              -- 加权 Intent
+            WHEN event_type = 'cart' THEN 3                   -- cart 权重 3（待校准）
+            WHEN event_type = 'view' THEN 1                   -- view 权重 1
+            ELSE 0
+        END) AS Intent,
+        MIN(event_time) AS first_seen                         -- 首次出现时间，用于新老用户区分
     FROM read_csv_auto('D:\实战项目\Dataanalysis\archive\*.csv')  -- 请替换为你的数据路径
     GROUP BY user_id
 ),
@@ -666,9 +691,11 @@ COPY (
 
 ![场景 B 导出结果](./images/image-20260413145316325.png)
 
-## 10. A/B 实验：优惠券策略效果验证
+## 10. A/B 实验：优惠券策略效果验证（方法论演示）
 
-本环节基于前序用户分层结果，模拟一次真实的 A/B 实验，验证两种优惠券策略对转化率（CVR）、客单价（AOV）及投入产出比（ROI）的差异化影响。
+> **说明：** 本章节为 A/B 实验方法论的完整演示。实验中的 CVR（11% / 13.5%）与 AOV（60 元 / 125 元）参数为模拟占位值，不代表真实实验结论。落地前需基于真实业务数据，通过功效分析（Power Analysis）确定最小样本量并设计实验。
+
+本环节基于前序用户分层结果，演示一次 A/B 实验的完整流程，展示如何验证两种优惠券策略对转化率（CVR）、客单价（AOV）及投入产出比（ROI）的差异化影响。
 
 ### 10.1 实验设计
 
@@ -772,22 +799,44 @@ t_stat, p_val_aov = stats.ttest_ind(
 
 ### 10.5 实验结论与业务建议
 
-**满减券（B 组）在 CVR 和 AOV 两个维度均显著优于无门槛券（A 组）：**
+> **以下结论基于模拟参数，仅展示分析方法。** 真实实验中，CVR 与 AOV 的具体数值需从实际业务数据中观测，不同业务场景下的最优券策略可能不同。
 
-- **转化率提升：** "满 100 减 20"制造了明确的消费目标感，有效降低了用户的决策犹豫，推动 CVR 从 11% 提升至 13.5%
+**在模拟设定下，满减券（B 组）在 CVR 和 AOV 两个维度均优于无门槛券（A 组）：**
+
+- **转化率提升：** "满 100 减 20"制造了明确的消费目标感，推动 CVR 从 11% 提升至 13.5%
 - **客单价跃迁：** 凑单效应使得 AOV 从 60 元跃升至 125 元，涨幅超过 100%
 - **成本可控性：** 虽然单券成本从 5 元增至 20 元，但 AOV 的大幅提升使得边际利润空间更充裕
 
-**落地建议：**
+**落地建议（需结合真实成本数据验证）：**
 
-| **策略**            | **适用客群**            | **理由**                       |
-| :------------------ | :---------------------- | :----------------------------- |
-| 满减券优先          | 核心高价值 / 一般客户   | 客单价高，凑单动力强           |
-| 无门槛券保留        | 重要挽留 / 高潜单次大客 | 降低回归门槛，避免流失         |
-| 混合策略 A/B 持续测 | 高互动普通客            | 需持续实验找到最优券面额与门槛 |
+| **策略**            | **适用客群**            | **前提条件**                                    |
+| :------------------ | :---------------------- | :---------------------------------------------- |
+| 满减券优先          | 核心高价值 / 一般客户   | 需确认目标客群的客单价分布能支撑满减门槛        |
+| 无门槛券保留        | 重要挽留 / 高潜单次大客 | 需测算单客 LTV 是否覆盖无门槛券成本             |
+| 混合策略 A/B 持续测 | 高互动普通客            | 需基于功效分析确定最小样本量，建议至少运行 2 周 |
 
 ## 11. 项目总结与业务赋能
 
 本项目从零到一构建了千万级真实电商用户的行为特征管道。在技术链路端，通过 DuckDB + CTE 架构成功解决了海量明细日志（13GB）在单机环境下的内存爆炸与降维聚合问题；在业务应用端，打破了传统 RFM 模型的 5 分制局限，创新性引入 Intent（意向因子）重构分层体系。最终不仅实现了大盘数据在 Power BI 中的自动化监控，更精准定位了 1.2% 的核心高意向潜客与 86% 的尾部无效流量，为后续营销资源的"控本增效"提供了直接的底层数据支撑。
 
-在策略验证环节，通过 A/B 实验对比了"5 元无门槛券"与"满 100 减 20 元券"两种优惠券方案，结果表明满减券在转化率（13.5% vs 11%）和客单价（125 元 vs 60 元）两个核心维度均显著胜出，为不同客群的差异化券策略提供了数据驱动的决策依据。
+在策略验证环节，通过 A/B 实验方法论演示了"5 元无门槛券"与"满 100 减 20 元券"两种优惠券方案的对比框架，展示了卡方检验与 Welch's T 检验的完整流程。模拟结果在设定参数下显示满减券在 CVR 和 AOV 两个维度更优，但真实结论需基于实际业务数据验证后方可采信。
+
+## 12. 模型局限性与使用前提
+
+本项目的分析框架和分层逻辑具备可复用性，但以下局限性在使用前需明确：
+
+**参数校准**
+
+- 当前分层阈值（如 Intent 中 cart 与 view 的权重比、M 的 6 分档边界值、潜客分层的 I/S 阈值）均基于本数据集的分布特征设定。迁移到其他业务场景时，需基于目标数据的分布重新校准，不可直接套用。
+
+**A/B 实验**
+
+- A/B 实验章节为方法论框架演示，其中 CVR（11% / 13.5%）与 AOV（60 元 / 125 元）参数为模拟占位值，不代表真实实验结论。落地前需通过功效分析（Power Analysis）确定最小样本量，并基于真实业务数据设计实验。
+
+**季节性偏差**
+
+- 数据覆盖 2019 年 10-11 月（含双十一促销期），F=1 用户中可能包含大量大促一次性购买用户，高客单价可能受囤货行为影响。将模型应用于日常运营时，需评估大促期间数据对分层结果的干扰程度。
+
+**营销成本**
+
+- 各用户标签对应的营销建议（如人工客服回访、VIP 权益建设）未附带成本测算。实际执行前需结合业务方的单客获客成本（CAC）与用户生命周期价值（LTV）计算投入产出比。

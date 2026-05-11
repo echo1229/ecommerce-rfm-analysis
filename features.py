@@ -27,6 +27,13 @@ df['session_seconds'] = df['avg_session'].dt.total_seconds()
 df['session_seconds'] = df['session_seconds'].fillna(0)
 
 
+#新老用户区分：首次出现时间在数据窗口末尾 7 天内的视为"新用户"
+#（7 天阈值待校准，可根据业务转化周期调整）
+NEW_USER_DAYS = 7  # 待校准
+data_end = df['first_seen'].max()
+df['is_new_user'] = (data_end - df['first_seen']).dt.days <= NEW_USER_DAYS
+
+
 
 ####用户标签
 #筛选出“成交客”（有购买记录的人，即频次大于0）
@@ -127,23 +134,27 @@ df_potential['S_score'] = pd.cut(df_potential['session_seconds'], bins=s_bins, l
 # 定义潜客分层逻辑函数
 def get_potential_segment(row):
     i, s = row['I_score'], row['S_score']
-    
+
+    # 新用户优先判断：首次出现时间在数据窗口末尾，尚未有足够时间转化
+    if row['is_new_user']:
+        return '新访客待观察'
+
     # 逻辑 A：高互动 + 高停留
     if i >= 4 and s >= 4:
         return '核心高意向潜客'
-    
+
     # 逻辑 B：低互动 + 高停留
     elif s >= 4 and i < 4:
         return '高时长静默潜客'
-    
+
     # 逻辑 C：高互动 + 低停留
     elif i >= 4 and s <= 2:
         return '浅层高频交互客'
-    
-    # 逻辑 D：低互动 + 低停留
+
+    # 逻辑 D：低互动 + 低停留（仅对老用户判定为低价值）
     elif i <= 2 and s <= 2:
         return '尾部低价值流量'
-    
+
     else:
         return '常规培育客群'
 df_potential['用户标签'] = df_potential.apply(get_potential_segment, axis=1)

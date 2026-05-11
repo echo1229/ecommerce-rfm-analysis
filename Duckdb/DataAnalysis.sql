@@ -4,7 +4,12 @@ SELECT user_id user_id,
 	MAX(CASE WHEN event_type = 'purchase' THEN event_time ELSE NULL END) Recency,
 	COUNT(CASE WHEN event_type = 'purchase' THEN  1 ELSE NULL END) Frequency,
 	SUM(CASE WHEN event_type = 'purchase' THEN price ELSE 0 END) monetary,
-	COUNT(CASE WHEN event_type IN ('view', 'cart') THEN 1 ELSE NULL END) Intent
+	SUM(CASE                                              -- 加权 Intent
+		WHEN event_type = 'cart' THEN 3                   -- cart 权重 3（待校准）
+		WHEN event_type = 'view' THEN 1                   -- view 权重 1
+		ELSE 0
+	END) AS Intent,
+	MIN(event_time) AS first_seen                         -- 首次出现时间，用于新老用户区分
 FROM sample_events
 GROUP BY user_id),
 
